@@ -15,12 +15,17 @@ export function LiveAvatarSessionComponent({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const sessionRef = useRef<LiveAvatarSession | null>(null);
+  // Prevents React Strict Mode from starting the session twice
+  const sessionStarted = useRef(false);
   const [isConnected, setIsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [messageText, setMessageText] = useState("");
   const [status, setStatus] = useState("Initializing...");
 
   useEffect(() => {
+    if (sessionStarted.current) return;
+    sessionStarted.current = true;
+
     const initSession = async () => {
       try {
         const session = new LiveAvatarSession(sessionConfig.sessionToken, {
@@ -79,6 +84,7 @@ export function LiveAvatarSessionComponent({
     return () => {
       if (sessionRef.current) {
         sessionRef.current.stop().catch(console.error);
+        sessionRef.current = null;
       }
     };
   }, [sessionConfig.sessionToken]);
@@ -128,10 +134,14 @@ export function LiveAvatarSessionComponent({
         <p className="text-sm text-gray-600">Status: {status}</p>
       </div>
 
+      {/* muted set imperatively to avoid SSR hydration mismatch */}
       <video
-        ref={videoRef}
+        ref={(el) => {
+          videoRef.current = el;
+          if (el) el.muted = true;
+        }}
         autoPlay
-        muted={true}
+        playsInline
         className="w-full aspect-video bg-black rounded-lg"
       />
 
