@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { LiveAvatarSession } from "@heygen/liveavatar-web-sdk";
+import {
+  LiveAvatarSession,
+  SessionEvent,
+  AgentEventsEnum,
+  SessionState,
+} from "@heygen/liveavatar-web-sdk";
 
 interface SessionConfig {
   sessionToken: string;
@@ -15,16 +20,25 @@ export function LiveAvatarSessionComponent({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const sessionRef = useRef<LiveAvatarSession | null>(null);
-  // Prevents React Strict Mode from starting the session twice
-  const sessionStarted = useRef(false);
+  // Debounce timer for stop — lets us cancel a pending stop if the component
+  // remounts immediately (React Strict Mode), while honouring it on real unmounts.
+  const stopTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [isConnected, setIsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [messageText, setMessageText] = useState("");
   const [status, setStatus] = useState("Initializing...");
 
   useEffect(() => {
-    if (sessionStarted.current) return;
-    sessionStarted.current = true;
+    // Cancel any pending stop from a previous cleanup (handles Strict Mode remount)
+    clearTimeout(stopTimer.current);
+
+    // If session already exists and is still live, just reattach to the video element
+    if (sessionRef.current) {
+      if (videoRef.current) {
+        sessionRef.current.attach(videoRef.current);
+      }
+      return;
+    }
 
     const initSession = async () => {
       try {
@@ -35,15 +49,15 @@ export function LiveAvatarSessionComponent({
 
         sessionRef.current = session;
 
-        session.on("SESSION_STATE_CHANGED", (state) => {
+        session.on(SessionEvent.SESSION_STATE_CHANGED, (state: SessionState) => {
           console.log("Session state changed:", state);
           setStatus(`Session state: ${state}`);
-          if (state === "CONNECTED") {
+          if (state === SessionState.CONNECTED) {
             setIsConnected(true);
           }
         });
 
-        session.on("SESSION_STREAM_READY", () => {
+        session.on(SessionEvent.SESSION_STREAM_READY, () => {
           console.log("Stream ready, attaching to video element");
           setStatus("Stream ready");
           if (videoRef.current) {
@@ -51,25 +65,22 @@ export function LiveAvatarSessionComponent({
           }
         });
 
-        session.on("SESSION_CONNECTION_QUALITY_CHANGED", (quality) => {
+        session.on(SessionEvent.SESSION_CONNECTION_QUALITY_CHANGED, (quality) => {
           console.log("Connection quality:", quality);
         });
 
-        session.on("USER_SPEAK_STARTED", () => {
-          console.log("User started speaking");
-        });
-
-        session.on("USER_SPEAK_ENDED", () => {
-          console.log("User stopped speaking");
-        });
-
-        session.on("AVATAR_SPEAK_STARTED", () => {
-          console.log("Avatar started speaking");
-        });
-
-        session.on("AVATAR_SPEAK_ENDED", () => {
-          console.log("Avatar stopped speaking");
-        });
+        session.on(AgentEventsEnum.USER_SPEAK_STARTED, () =>
+          console.log("User started speaking")
+        );
+        session.on(AgentEventsEnum.USER_SPEAK_ENDED, () =>
+          console.log("User stopped speaking")
+        );
+        session.on(AgentEventsEnum.AVATAR_SPEAK_STARTED, () =>
+          console.log("Avatar started speaking")
+        );
+        session.on(AgentEventsEnum.AVATAR_SPEAK_ENDED, () =>
+          console.log("Avatar stopped speaking")
+        );
 
         setStatus("Starting session...");
         await session.start();
@@ -82,18 +93,19 @@ export function LiveAvatarSessionComponent({
     initSession();
 
     return () => {
-      if (sessionRef.current) {
-        sessionRef.current.stop().catch(console.error);
+      // Delay the stop so a fast remount (Strict Mode) can cancel it
+      stopTimer.current = setTimeout(() => {
+        sessionRef.current?.stop().catch(console.error);
         sessionRef.current = null;
-      }
+        setIsConnected(false);
+      }, 300);
     };
   }, [sessionConfig.sessionToken]);
 
-  const handleSendMessage = async () => {
+  const handleSendMessage = () => {
     if (!messageText.trim() || !sessionRef.current) return;
-
     try {
-      await sessionRef.current.message(messageText);
+      sessionRef.current.message(messageText);
       setMessageText("");
     } catch (error) {
       console.error("Error sending message:", error);
@@ -103,7 +115,6 @@ export function LiveAvatarSessionComponent({
 
   const handleToggleMute = async () => {
     if (!sessionRef.current?.voiceChat) return;
-
     try {
       if (isMuted) {
         await sessionRef.current.voiceChat.unmute();
@@ -116,11 +127,10 @@ export function LiveAvatarSessionComponent({
     }
   };
 
-  const handleInterrupt = async () => {
+  const handleInterrupt = () => {
     if (!sessionRef.current) return;
-
     try {
-      await sessionRef.current.interrupt();
+      sessionRef.current.interrupt();
       setStatus("Avatar interrupted");
     } catch (error) {
       console.error("Error interrupting:", error);
@@ -134,7 +144,7 @@ export function LiveAvatarSessionComponent({
         <p className="text-sm text-gray-600">Status: {status}</p>
       </div>
 
-      {/* muted set imperatively to avoid SSR hydration mismatch */}
+      {/* muted set imperatively via ref to avoid SSR hydration mismatch */}
       <video
         ref={(el) => {
           videoRef.current = el;
@@ -171,9 +181,7 @@ export function LiveAvatarSessionComponent({
           value={messageText}
           onChange={(e) => setMessageText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              handleSendMessage();
-            }
+            if (e.key === "Enter") handleSendMessage();
           }}
           placeholder="Type a message..."
           className="flex-1 px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
